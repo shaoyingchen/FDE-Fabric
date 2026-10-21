@@ -54,9 +54,18 @@ class RepositoryPort(Protocol):
 
     # --- Tool call idempotency ---
     async def tool_call_has_run(self, idempotency_key: str) -> bool: ...
-    async def record_tool_call(self, *, idempotency_key: str, task_id: str | None,
+    async def record_tool_call(self, *, idempotency_key: str, run_id: str | None = None,
+                               task_id: str | None,
                                tool_name: str, status: str, result: dict[str, Any] | None,
                                error: dict[str, Any] | None) -> None: ...
+    async def get_tool_call_result(self, idempotency_key: str) -> dict[str, Any] | None: ...
+    async def list_tool_calls(self, run_id: str) -> list[dict[str, Any]]: ...
+
+    # --- Lease & recovery ---
+    async def release_task_lease(self, run_id: str, task_id: str) -> None: ...
+    async def list_stale_tasks(self, now: float) -> list[dict[str, Any]]:
+        """查找租约已过期但仍 running 的任务（Worker 崩溃恢复用）。"""
+        ...
 
     # --- A2A tracking ---
     async def upsert_a2a_task(self, *, a2a_task_id: str, run_id: str, task_id: str,

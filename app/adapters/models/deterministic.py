@@ -60,8 +60,13 @@ class DeterministicModelProvider:
         next_tool = next((t for t in tool_steps if t in allowed_tools and t not in used), None)
 
         if next_tool:
-            return ModelDecision(type="tool_call", tool=next_tool,
-                                 arguments={"query": task.get("description", "")})
+            task_text = task.get("description", "")
+            args = {"query": task_text}
+            if next_tool == "fetch_page":
+                args = {"url": task_text}
+            elif next_tool == "extract_evidence":
+                args = {"content": task_text}
+            return ModelDecision(type="tool_call", tool=next_tool, arguments=args)
         # 完成，返回结构化结果
         result = {
             "task_id": task.get("task_id"),

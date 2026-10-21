@@ -22,7 +22,28 @@ class TaskExecutionResult(BaseModel):
     status: str  # succeeded / failed / needs_replan / timeout
     result: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    retryable: bool = False  # 可重试错误（暂时性）；永久错误为 False
+    cost: float = 0.0        # 本次执行成本（预算记账用）
     meta: dict[str, Any] = {}
+
+
+# 永久错误码（不可重试）
+_PERMANENT_ERRORS = {
+    "PERMISSION_DENIED",
+    "SCHEMA_ERROR",
+    "NO_AGENT",
+    "A2A_SEND_ERROR",
+    "MODEL_ERROR",
+    "DET_ERROR",
+    "UNSUPPORTED_ACTION",
+    "MAX_STEPS_EXCEEDED",
+}
+
+
+def classify_retryable(error: dict[str, Any] | None) -> bool:
+    if not error:
+        return False
+    return error.get("code") not in _PERMANENT_ERRORS
 
 
 class TaskRunner:
@@ -55,7 +76,7 @@ class TaskRunner:
 
         if mode == "remote_a2a":
             if agent is None or not agent.endpoint:
-                return TaskExecutionResult(status="failed",
+                return TaskExecutionResult(status="failed", retryable=False,
                                            error={"code": "NO_AGENT", "message": "缺少远程 Agent 端点"})
             return await self._execute_a2a(task, agent, run_id)
 
@@ -63,12 +84,23 @@ class TaskRunner:
             return await self._run_deterministic(task)
 
         # local_react 默认
-        result = await self._local.invoke(
-            agent=agent, task=task, context=context, deadline_seconds=task.get("timeout_seconds", 300)
-        )
+        try:
+            result = await asyncio.wait_for(
+                self._local.invoke(
+                    agent=agent, task=task, context=context,
+                    deadline_seconds=task.get("timeout_seconds", 300),
+                ),
+                timeout=task.get("timeout_seconds", 300),
+            )
+        except asyncio.TimeoutError:
+            return TaskExecutionResult(status="timeout", retryable=True,
+                                       error={"code": "TASK_TIMEOUT",
+                                              "message": "本地执行超时"})
         status = result.get("status", "failed")
+        error = result.get("error")
         return TaskExecutionResult(status=status, result=result.get("result"),
-                                   error=result.get("error"),
+                                   error=error, retryable=classify_retryable(error),
+                                   cost=result.get("cost", 0.0),
                                    meta={"mode": "local_react"})
 
     # --- A2A ---
@@ -86,7 +118,7 @@ class TaskRunner:
                 endpoint=agent.endpoint, message=message, task_id=task.get("task_id")
             )
         except Exception as exc:
-            return TaskExecutionResult(status="failed",
+            return TaskExecutionResult(status="failed", retryable=True,
                                        error={"code": "A2A_SEND_ERROR", "message": str(exc)})
 
         a2a_task_id = sent["task_id"]
@@ -116,10 +148,17 @@ class TaskRunner:
                                        result={"a2a_task_id": a2a_task_id,
                                                "artifacts": last.get("artifacts", [])},
                                        meta={"mode": "remote_a2a"})
+        if last.get("status") == "failed":
+            return TaskExecutionResult(
+                status="failed", retryable=False,
+                error={"code": "A2A_FAILED",
+                       "message": f"远程任务失败: {last.get('error')}"},
+                meta={"mode": "remote_a2a", "a2a_task_id": a2a_task_id},
+            )
         return TaskExecutionResult(
-            status="failed" if last.get("status") == "failed" else "timeout",
-            error={"code": "A2A_NOT_COMPLETED",
-                   "message": f"远程任务状态: {last.get('status')}"},
+            status="timeout", retryable=True,
+            error={"code": "A2A_TIMEOUT",
+                   "message": f"远程任务未在时限内完成: {last.get('status')}"},
             meta={"mode": "remote_a2a", "a2a_task_id": a2a_task_id},
         )
 
@@ -134,8 +173,9 @@ class TaskRunner:
             return TaskExecutionResult(status="succeeded", result=out,
                                        meta={"mode": "deterministic"})
         except Exception as exc:
-            return TaskExecutionResult(status="failed", error={"code": "DET_ERROR",
-                                                               "message": str(exc)})
+            return TaskExecutionResult(status="failed", retryable=False,
+                                       error={"code": "DET_ERROR",
+                                              "message": str(exc)})
 
     @staticmethod
     async def _default_deterministic(task: dict[str, Any]) -> dict[str, Any]:

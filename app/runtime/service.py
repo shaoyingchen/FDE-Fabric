@@ -33,11 +33,21 @@ class RuntimeService:
         registry: RegistryService,
         model: ModelProvider,
         checkpointer=None,
+        worker_id: str = "worker-default",
+        retry_backoff_base: float = 1.0,
+        retry_backoff_factor: float = 2.0,
+        retry_max_wait: float = 60.0,
+        metrics=None,
     ) -> None:
         self._repo = repo
         self._services = RuntimeServices(
             repo=repo, planner=planner, dispatcher=dispatcher,
             runner=runner, registry=registry, model=model,
+            worker_id=worker_id,
+            retry_backoff_base=retry_backoff_base,
+            retry_backoff_factor=retry_backoff_factor,
+            retry_max_wait=retry_max_wait,
+            metrics=metrics,
         )
         self._checkpointer = checkpointer or InMemorySaver()
         self._graph = build_runtime_graph(self._services, self._checkpointer)
@@ -147,9 +157,30 @@ class RuntimeService:
         # 持久化状态已是最新；从当前状态继续执行
         return await self.execute_run(run_id)
 
-    # --- 恢复扫描（进程重启后找回未完成 Run） ---
+    # --- 恢复扫描（进程重启后找回未完成 Run + 过期租约） ---
+
+    async def recover_stale_tasks(self) -> int:
+        """将租约已过期的 running 任务重置为 ready（Worker 崩溃恢复）。"""
+        stale = await self._repo.list_stale_tasks(time.time())
+        cleaned = 0
+        for task in stale:
+            run_id = task["run_id"]
+            task_id = task["task_id"]
+            # 重置为 ready 并释放租约
+            await self._repo.update_task({
+                "run_id": run_id, "task_id": task_id,
+                "status": "ready", "lease_owner": None, "lease_expires_at": None,
+                "updated_at": time.time(),
+            })
+            await self._repo.append_event(
+                run_id=run_id, event_type="task.recovered",
+                task_id=task_id, payload={"from": "stale_lease"},
+            )
+            cleaned += 1
+        return cleaned
 
     async def recover_active_runs(self) -> list[str]:
+        await self.recover_stale_tasks()
         active = await self._repo.list_active_runs()
         recovered = []
         for run in active:

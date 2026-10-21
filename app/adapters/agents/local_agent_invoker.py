@@ -1,12 +1,13 @@
 """本地 Agent 执行器 — 局部 ReAct 循环，通过 Tool Gateway 调用 MCP/本地工具。
 
 文档附录 §8 ReActExecutor 的 AgentInvoker 承载实现。
+幂等键使用持久化逻辑 action ID：{run_id}:{task_id}:{attempt}:{step}，
+同一个逻辑动作重试时复用同一 ID（附录 §8：不是每次重启后重新生成）。
 """
 
 from __future__ import annotations
 
 import time
-import uuid
 from typing import Any
 
 from ...ports.model import ModelProvider
@@ -37,6 +38,7 @@ class LocalAgentInvoker:
     ) -> dict[str, Any]:
         run_id = context.get("run_id")
         task_id = context.get("task_id")
+        attempt = task.get("attempt", 0)
         allowed = [s.name for s in await self._tools.list_tools()]
         observations: list[dict[str, Any]] = []
 
@@ -44,7 +46,8 @@ class LocalAgentInvoker:
         steps = 0
         while steps < self._max_steps:
             if time.monotonic() - started > deadline_seconds:
-                return {"status": "timeout", "error": {"code": "DEADLINE_EXCEEDED"}}
+                return {"status": "timeout",
+                        "error": {"code": "TASK_TIMEOUT", "message": "超过截止时间"}}
             decision = await self._model.next_action(
                 task=task, observations=observations, allowed_tools=allowed
             )
@@ -61,7 +64,8 @@ class LocalAgentInvoker:
                                                       "message": f"工具越权: {decision.tool}"}}
 
             steps += 1
-            idempotency_key = f"{run_id}:{task_id}:{uuid.uuid4().hex}" if task_id else f"{uuid.uuid4().hex}"
+            # 持久化逻辑 action ID：重试同一逻辑动作复用同一 ID（幂等恢复）
+            idempotency_key = f"{run_id}:{task_id}:{attempt}:step{steps}"
             obs = await self._tools.execute(
                 name=decision.tool,
                 arguments=decision.arguments or {},

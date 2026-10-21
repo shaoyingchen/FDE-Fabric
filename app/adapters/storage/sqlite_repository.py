@@ -114,6 +114,7 @@ class EventRow(Base):
 class ToolCallRow(Base):
     __tablename__ = "agent_tool_calls"
     idempotency_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     tool_name: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32))
@@ -162,6 +163,25 @@ class SqliteRepository(RepositoryPort):
     async def init_schema(self) -> None:
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            # 轻量迁移：为已存在的旧表补齐新增列（SQLite dev；生产用 Alembic）
+            await self._ensure_column(conn, "agent_tool_calls", "run_id",
+                                      "VARCHAR(64)")
+
+    async def _ensure_column(self, conn, table: str, column: str, ddl: str) -> None:
+        """若表存在但缺列，则 ALTER TABLE ADD COLUMN（幂等）。"""
+        from sqlalchemy import text as sa_text
+
+        def sync_run(connection):
+            has = connection.execute(
+                sa_text(f"PRAGMA table_info({table})")
+            ).fetchall()
+            cols = {row[1] for row in has}
+            if column not in cols:
+                connection.execute(
+                    sa_text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                )
+
+        await conn.run_sync(sync_run)
 
     async def dispose(self) -> None:
         await self._engine.dispose()
@@ -529,17 +549,70 @@ class SqliteRepository(RepositoryPort):
             row = (await s.execute(select(ToolCallRow).where(ToolCallRow.idempotency_key == idempotency_key))).scalar_one_or_none()
             return row is not None
 
-    async def record_tool_call(self, *, idempotency_key: str, task_id: str | None,
+    async def record_tool_call(self, *, idempotency_key: str, run_id: str | None = None,
+                               task_id: str | None,
                                tool_name: str, status: str, result: dict | None,
                                error: dict | None) -> None:  # type: ignore[override]
         from time import time as _t
 
         row = ToolCallRow(idempotency_key=idempotency_key, task_id=task_id,
-                          tool_name=tool_name, status=status, result=result,
-                          error=error, created_at=_t())
+                          run_id=run_id, tool_name=tool_name, status=status,
+                          result=result, error=error, created_at=_t())
         async with self._session() as s:
-            s.merge(row)
+            await s.merge(row)
             await s.commit()
+
+    async def get_tool_call_result(self, idempotency_key: str) -> dict | None:  # type: ignore[override]
+        async with self._session() as s:
+            row = (
+                await s.execute(
+                    select(ToolCallRow).where(ToolCallRow.idempotency_key == idempotency_key)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return {"status": row.status, "result": row.result, "error": row.error}
+
+    async def list_tool_calls(self, run_id: str) -> list:  # type: ignore[override]
+        async with self._session() as s:
+            rows = (
+                await s.execute(
+                    select(ToolCallRow).where(ToolCallRow.run_id == run_id).order_by(ToolCallRow.created_at)
+                )
+            ).scalars().all()
+            return [
+                {"idempotency_key": r.idempotency_key, "task_id": r.task_id,
+                 "tool_name": r.tool_name, "status": r.status, "result": r.result,
+                 "error": r.error, "created_at": r.created_at}
+                for r in rows
+            ]
+
+    # --- Lease & recovery ---
+
+    async def release_task_lease(self, run_id: str, task_id: str) -> None:  # type: ignore[override]
+        async with self._session() as s:
+            row = (
+                await s.execute(
+                    select(TaskRow).where(TaskRow.run_id == run_id, TaskRow.task_id == task_id)
+                )
+            ).scalar_one_or_none()
+            if row:
+                row.lease_owner = None
+                row.lease_expires_at = None
+                await s.commit()
+
+    async def list_stale_tasks(self, now: float) -> list:  # type: ignore[override]
+        async with self._session() as s:
+            rows = (
+                await s.execute(
+                    select(TaskRow).where(
+                        TaskRow.status == "running",
+                        TaskRow.lease_expires_at.is_not(None),
+                        TaskRow.lease_expires_at < now,
+                    )
+                )
+            ).scalars().all()
+            return [self._task_to_dict(r) for r in rows]
 
     # --- A2A tracking ---
 

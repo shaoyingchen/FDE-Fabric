@@ -106,6 +106,21 @@ def create_app(*, container: Container | None = None) -> FastAPI:
         runtime: RuntimeService = container.runtime
         return await runtime.resume_run(run_id)
 
+    @app.get("/api/runs/{run_id}/tool-calls")
+    async def get_run_tool_calls(run_id: str):
+        return await container.repo.list_tool_calls(run_id)
+
+    @app.get("/api/metrics")
+    async def get_metrics():
+        return container.metrics.snapshot()
+
+    @app.post("/api/recovery/scan")
+    async def recovery_scan():
+        runtime: RuntimeService = container.runtime
+        stale = await runtime.recover_stale_tasks()
+        runs = await runtime.recover_active_runs()
+        return {"stale_recovered": stale, "runs_recovered": runs}
+
     # --- Agent Registry ---
 
     @app.post("/api/registry/agents", status_code=201)
