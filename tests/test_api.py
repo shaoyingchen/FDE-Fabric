@@ -75,6 +75,36 @@ async def test_registry_crud(client):
     assert gone.status_code == 404
 
 
+async def test_dashboard_stats(client):
+    await client.post("/api/runs", json={"goal": "生成报告"})
+    for _ in range(20):
+        r = await client.get("/api/dashboard/stats")
+        st = r.json()
+        if st["runs_total"] > 0:
+            break
+        await asyncio.sleep(0.1)
+    assert r.status_code == 200
+    assert st["runs_total"] >= 1
+    assert "runs_by_status" in st
+    assert "agents_total" in st
+    assert "tasks_executed" in st
+    assert "recent_runs" in st
+
+
+async def test_agent_card_and_probe(client):
+    # 无 endpoint 的 Agent：probe-all 不抛错；card 回退名称
+    await client.post(
+        "/api/registry/agents",
+        json={"agent_id": "probe1", "name": "Probe", "endpoint": "", "skills": ["research"]},
+    )
+    pr = await client.post("/api/registry/probe-all")
+    assert pr.status_code == 200
+
+    card = await client.get("/api/registry/agents/probe1/card")
+    assert card.status_code == 200
+    assert card.json()["name"] == "Probe"
+
+
 async def test_console_index_served(container):
     from pathlib import Path
 

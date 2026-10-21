@@ -197,5 +197,40 @@ class RuntimeService:
     async def list_runs(self, *, status: str | None = None, limit: int = 50) -> list[dict]:
         return await self._repo.list_runs(status=status, limit=limit)
 
+    async def dashboard_stats(self) -> dict:
+        """管理面板聚合统计：Run/Agent 状态分布、任务执行量、工具调用量、最近运行。"""
+        import asyncio
+
+        runs = await self._repo.list_runs(limit=500)
+        agents = await self._repo.list_agents()
+        metrics = (
+            self._services.metrics.snapshot()
+            if self._services.metrics is not None
+            else {}
+        )
+
+        run_status: dict[str, int] = {}
+        for r in runs:
+            run_status[r["status"]] = run_status.get(r["status"], 0) + 1
+
+        agent_status: dict[str, int] = {}
+        for a in agents:
+            agent_status[a["status"]] = agent_status.get(a["status"], 0) + 1
+
+        counters = metrics.get("counters", {})
+        return {
+            "runs_total": len(runs),
+            "runs_by_status": run_status,
+            "agents_total": len(agents),
+            "agents_by_status": agent_status,
+            "tasks_executed": counters.get("tasks.executed", 0),
+            "tasks_succeeded": counters.get("tasks.succeeded", 0),
+            "tasks_failed": counters.get("tasks.failed", 0),
+            "tool_calls_executed": counters.get("tool_calls.executed", 0),
+            "tool_calls_acked": counters.get("tool_calls.acked", 0),
+            "durations": metrics.get("durations", {}),
+            "recent_runs": runs[:20],
+        }
+
     async def repo(self) -> RepositoryPort:
         return self._repo

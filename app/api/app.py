@@ -114,6 +114,11 @@ def create_app(*, container: Container | None = None) -> FastAPI:
     async def get_metrics():
         return container.metrics.snapshot()
 
+    @app.get("/api/dashboard/stats")
+    async def dashboard_stats():
+        runtime: RuntimeService = container.runtime
+        return await runtime.dashboard_stats()
+
     @app.post("/api/recovery/scan")
     async def recovery_scan():
         runtime: RuntimeService = container.runtime
@@ -126,6 +131,9 @@ def create_app(*, container: Container | None = None) -> FastAPI:
     @app.post("/api/registry/agents", status_code=201)
     async def register_agent(record: AgentRegistryRecord):
         registry: RegistryService = container.registry
+        existing = await registry.get_by_id(record.agent_id)
+        if existing is not None:
+            raise HTTPException(409, f"Agent 已存在: {record.agent_id}")
         await registry.register(record)
         return await registry.get_by_id(record.agent_id)
 
@@ -134,6 +142,12 @@ def create_app(*, container: Container | None = None) -> FastAPI:
         registry: RegistryService = container.registry
         return [a.model_dump() for a in await registry.list_agents(skill=skill, status=status)]
 
+    @app.post("/api/registry/probe-all")
+    async def probe_all_agents():
+        registry: RegistryService = container.registry
+        await registry.probe_all()
+        return [a.model_dump() for a in await registry.list_agents()]
+
     @app.get("/api/registry/agents/{agent_id}")
     async def get_agent(agent_id: str):
         registry: RegistryService = container.registry
@@ -141,6 +155,14 @@ def create_app(*, container: Container | None = None) -> FastAPI:
         if agent is None:
             raise HTTPException(404, "Agent 未注册")
         return agent.model_dump()
+
+    @app.get("/api/registry/agents/{agent_id}/card")
+    async def get_agent_card(agent_id: str):
+        registry: RegistryService = container.registry
+        agent = await registry.get_by_id(agent_id)
+        if agent is None:
+            raise HTTPException(404, "Agent 未注册")
+        return await container.a2a.resolve_agent_card(agent)
 
     @app.delete("/api/registry/agents/{agent_id}")
     async def deregister_agent(agent_id: str):
