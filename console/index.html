@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FDE Fabric — 控制台</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #171e26; --border: #26303c;
+    --fg: #d8e0ea; --muted: #8b98a8; --accent: #4f9cf9;
+    --ok: #3fb950; --warn: #d29922; --err: #f85149; --run: #58a6ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 24px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 18px; letter-spacing: .5px; }
+  header .tag { color: var(--muted); font-size: 12px; }
+  main { display: flex; height: calc(100vh - 57px); }
+  aside { width: 320px; border-right: 1px solid var(--border); overflow-y: auto; padding: 12px; }
+  section { flex: 1; overflow-y: auto; padding: 20px 24px; }
+  .btn { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 7px 14px; cursor: pointer; font-size: 13px; }
+  .btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--fg); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 12px; cursor: pointer; transition: border-color .15s; }
+  .card:hover { border-color: var(--accent); }
+  .card.active { border-color: var(--accent); }
+  .card .title { font-weight: 600; }
+  .card .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; text-transform: uppercase; }
+  .b-succeeded { background: #12301c; color: var(--ok); }
+  .b-failed  { background: #3a1216; color: var(--err); }
+  .b-running { background: #122b45; color: var(--run); }
+  .b-cancelled, .b-paused { background: #34260d; color: var(--warn); }
+  .b-pending, .b-created { background: #1d2733; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  .kv { display: grid; grid-template-columns: 110px 1fr; gap: 4px 12px; font-size: 13px; }
+  .kv .k { color: var(--muted); }
+  pre { background: #0b0f14; border: 1px solid var(--border); border-radius: 6px; padding: 10px; overflow: auto; font-size: 12px; max-height: 320px; }
+  .tabs button { background: transparent; border: 0; color: var(--muted); padding: 8px 14px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 13px; }
+  .tabs button.on { color: var(--fg); border-bottom-color: var(--accent); }
+  .muted { color: var(--muted); }
+  .fade { opacity: .55; }
+</style>
+</head>
+<body>
+<header>
+  <h1>FDE Fabric</h1>
+  <span class="tag">Full-chain Delivery Engine · 控制台</span>
+  <span style="flex:1"></span>
+  <button class="btn" id="btn-new">新 Run</button>
+  <button class="btn ghost" id="btn-refresh">刷新</button>
+</header>
+<main>
+  <aside>
+    <div id="run-list" style="margin-top:8px"><div class="muted">加载中…</div></div>
+  </aside>
+  <section id="detail">
+    <div class="muted" style="padding:40px;text-align:center">
+      左侧选择 Run 查看详情<br><br>
+      <button class="btn ghost" id="btn-demo">运行一个示例调研任务</button>
+    </div>
+    <div id="detail-content" style="display:none"></div>
+  </section>
+</main>
+
+<dialog id="dlg" style="background:var(--panel);color:var(--fg);border:1px solid var(--border);border-radius:10px;padding:20px;width:480px">
+  <h3 style="margin-bottom:12px">创建 Run</h3>
+  <label>目标（goal）</label>
+  <textarea id="in-goal" rows="3" style="width:100%;background:#0b0f14;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;margin:6px 0 14px">生成企业级 AI Agent 市场研究报告</textarea>
+  <div style="text-align:right">
+    <button class="btn ghost" onclick="this.closest('dialog').close()">取消</button>
+    <button class="btn" id="btn-ok">提交</button>
+  </div>
+</dialog>
+
+<script>
+const $ = s => document.querySelector(s);
+const state = { runs: [], current: null, tab: 'overview' };
+
+async function api(path, opts) {
+  const r = await fetch('/api' + path, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function badge(s) { return `<span class="badge b-${s}">${s}</span>`; }
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function refreshRuns() {
+  try {
+    state.runs = await api('/runs');
+    const list = $('#run-list');
+    list.innerHTML = state.runs.length
+      ? state.runs.map(r => `
+        <div class="card ${state.current === r.run_id ? 'active' : ''}" data-id="${r.run_id}" onclick="selectRun('${r.run_id}')">
+          <div class="title">${esc(r.goal || '(无目标)')}</div>
+          <div class="meta">${r.run_id} · ${badge(r.status)}</div>
+        </div>`).join('')
+      : '<div class="muted">暂无 Run</div>';
+    if (state.current && state.runs.some(r => r.run_id === state.current)) {
+      renderDetail();
+    }
+  } catch (e) { console.error(e); }
+}
+
+async function selectRun(id) {
+  state.current = id;
+  state.tab = 'overview';
+  await refreshRuns();
+}
+
+async function renderDetail() {
+  const run = await api('/runs/' + state.current);
+  state.runs = state.runs.map(r => r.run_id === run.run_id ? {...r, status: run.status} : r);
+  const tasks = await api(`/runs/${state.current}/tasks`);
+  const events = await api(`/runs/${state.current}/events`);
+  const steps = await api(`/runs/${state.current}/steps`);
+  const artifacts = await api(`/runs/${state.current}/artifacts`);
+  $('#detail').innerHTML = `
+    <h2 style="margin-bottom:6px">${esc(run.goal)}</h2>
+    <div class="meta" style="margin-bottom:14px">${run.run_id} · ${badge(run.status)}
+      ${run.progress ? `<span class="muted"> · 进度 ${run.progress}</span>` : ''}
+      <span style="float:right">
+        <button class="btn ghost" onclick="act('cancel')" style="margin-right:6px">取消</button>
+        <button class="btn ghost" onclick="act('resume')">恢复</button>
+      </span>
+    </div>
+    <div class="tabs" style="margin-bottom:10px">
+      ${['overview','tasks','events','steps','artifacts'].map(t =>
+        `<button class="${state.tab===t?'on':''}" onclick="setTab('${t}')">${t}</button>`).join('')}
+    </div>
+    <div id="tab-body"></div>`;
+  renderTab({run, tasks, events, steps, artifacts}, $('#tab-body'));
+}
+
+const TAB_RENDER = {
+  overview: ({run}) => `
+    <div class="card">
+      <div class="url kv">
+        <div class="k">目标</div><div>${esc(run.goal)}</div>
+        <div class="k">状态</div><div>${badge(run.status)}</div>
+        <div class="k">计划版本</div><div>${run.plan_version}</div>
+        <div class="k">预算</div><div>${run.budget ?? '-'}</div>
+        <div class="k">截止</div><div>${esc(run.deadline || '-')}</div>
+        <div class="k">错误</div><div>${run.error ? esc(JSON.stringify(run.error)) : '-'}</div>
+        <div class="k">摘要</div><div>${esc(run.final_summary || '-')}</div>
+      </div>
+    </div>`,
+  tasks: ({tasks}) => `
+    <div class="card"><table>
+      <tr><th>task_id</th><th>描述</th><th>模式</th><th>依赖</th><th>状态</th><th>attempt</th><th>结果</th></tr>
+      ${tasks.length ? tasks.map(t => `<tr>
+        <td>${esc(t.task_id)}</td><td>${esc(t.description)}</td>
+        <td>${esc(t.execution_mode)}</td>
+        <td>${esc((t.depends_on||[]).join(',') || '-')}</td>
+        <td>${badge(t.status)}</td><td>${t.attempt}</td>
+        <td>${t.result_summary ? `<pre style="max-height:80px">${esc(JSON.stringify(t.result_summary))}</pre>` : (t.error ? `<span class="badge b-failed">${esc(t.error.code)}</span>` : '-')}</td>
+      </tr>`).join('') : '<tr><td colspan="7" class="muted">暂无任务</td></tr>'}
+    </table></div>`,
+  events: ({events}) => `
+    <div class="card"><table>
+      <tr><th>#</th><th>类型</th><th>task</th><th>payload</th></tr>
+      ${events.length ? events.map(e => `<tr><td>${e.seq}</td><td>${badge(e.event_type)}</td><td>${esc(e.task_id||'-')}</td><td><pre>${esc(JSON.stringify(e.payload))}</pre></td></tr>`).join('') : '<tr><td colspan="4" class="muted">暂无事件</td></tr>'}
+    </table></div>`,
+  steps: ({steps}) => `
+    <div class="card"><table>
+      <tr><th>step_id</th><th>type</th><th>name</th><th>status</th><th>耗时(ms)</th></tr>
+      ${steps.length ? steps.map(s => `<tr><td>${esc(s.step_id)}</td><td>${esc(s.step_type)}</td><td>${esc(s.name)}</td><td>${badge(s.status)}</td><td>${s.duration_ms ?? '-'}</td></tr>`).join('') : '<tr><td colspan="5" class="muted">暂无步骤</td></tr>'}
+    </table></div>`,
+  artifacts: ({artifacts}) => `
+    <div class="card">${artifacts.length ? `<table><tr><th>task_id</th><th>描述</th><th>结果</th></tr>${artifacts.map(a => `<tr><td>${esc(a.task_id)}</td><td>${esc(a.description)}</td><td><pre>${esc(JSON.stringify(a.result))}</pre></td></tr>`).join('')}</table>` : '<div class="muted">暂无产物</div>'}</div>`,
+};
+
+function renderTab(data, node) {
+  node.innerHTML = (TAB_RENDER[state.tab] || TAB_RENDER.overview)(data);
+}
+
+function setTab(t) { state.tab = t; renderDetail(); }
+
+async function act(kind) {
+  await api(`/runs/${state.current}/${kind}`, {method: 'POST'});
+  await renderDetail();
+  refreshRuns();
+}
+
+$('#btn-new').onclick = () => $('#dlg').showModal();
+$('#btn-ok').onclick = async () => {
+  const goal = $('#in-goal').value.trim();
+  if (!goal) return;
+  $('#dlg').close();
+  const r = await api('/runs', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({goal})});
+  state.current = r.run_id;
+  refreshRuns();
+  setTimeout(renderDetail, 1500);
+};
+$('#btn-refresh').onclick = () => { refreshRuns(); if (state.current) renderDetail(); };
+$('#btn-demo').onclick = async () => {
+  const r = await api('/runs', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({goal: '生成企业级 AI Agent 市场研究报告'})});
+  state.current = r.run_id;
+  refreshRuns();
+  setTimeout(renderDetail, 1500);
+};
+
+refreshRuns();
+setInterval(() => { if (state.current) refreshRuns(); }, 5000);
+</script>
+</body>
+</html>
